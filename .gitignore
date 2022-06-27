@@ -6,8 +6,6 @@ kpi-monitoring-job/data/*
 !split-test-data-app-v1/data/README.md
 !split-test-data-app-v0/data/README.md
 !kpi-monitoring-job/data/README.md
-data/*
-!data/README.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
