@@ -20,6 +20,7 @@ server = flask.Flask(__name__)
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.FLATLY], server=server)
 
 
+# Setup root directory
 ROOT_DIR = os.path.dirname(os.path.realpath(__file__))
 
 # Create the shop index
@@ -37,13 +38,11 @@ DATA = pd.read_csv(os.path.join(ROOT_DIR, 'data', 'sales.zip'), sep=';')
 DATA.date = pd.to_datetime(DATA.date)
 
 
-
+# Setup the lauput of the app
 layout = dbc.Container([
     dcc.Store(id='data-sample'),
     dbc.Row([html.H1('Salles prediction data app')]),
     dbc.Row(html.H6('A toy interactive tool for predicting future sales via an ARIMA model. ')),
-
-
     dbc.Row([
         dbc.Col([
             dbc.Card([
@@ -118,7 +117,12 @@ layout = dbc.Container([
                 min=1, max=31, step=1, value=3
             )
         ], width=1),
-        dbc.Col(dbc.Button('P R E D I C T', color = 'secondary', id='predict-but'), width = 2)
+        dbc.Col([
+            dbc.Button(
+                'P R E D I C T',
+                color = 'secondary',
+                id='predict-but')
+        ], width = 2)
     ], style={"margin-top": "25px", "margin-bottom": "10px"}),
 
     # Output :
@@ -171,30 +175,41 @@ def load_data_from_sf(metric, shopid, categoryid, gran):
 )
 def plot_ts(data, diff, dategran, metric_lab, shop_lab, cat_lab, horizon, predict):
 
-    changed_id = [p['prop_id'] for p in dash.callback_context.triggered][0]
+    """
+    This function is used both to plot time series data and to simulate and overlay predictions
+    based on auto ARIMA models.
+    """
+
+    # MAPS
     METRIC_MAP = {'item_cnt_day': 'Items Count', 'revenue': 'Revenue'}
+    ROYAL_BLUE = dict(color="#4169e1")
+    SCARLET_RED = dict(color="#FF2400")
+    ORANGE = dict(color="#FFA500")
+
+    # Capturing daily seasonality is very slow. Thats why we only enable it for monthly data
+    SES_SETUP = {'m': 12, 'seasonal': True} if dategran == 'M' else {'m': 1, 'seasonal': False}
+
+
+    # Define some variables that will be used as labels
+    changed_id = [p['prop_id'] for p in dash.callback_context.triggered][0]
     metric = METRIC_MAP[metric_lab]
-
-
-    # Define titles
     shop_label = "" if shop_lab == -1 else f" {[i['label'] for i in SHOP_INDEX if i['value'] ==shop_lab]} "
     category_label = "" if cat_lab == -1 else f" {[i['label'] for i in ICAT_INDEX if i['value'] ==shop_lab]} "
     main_title = f'{metric}{shop_label}{category_label}'
 
+
+    # Set the layout of the plot
     fig = make_subplots(rows=3, cols=2, specs=[[{"rowspan":3}, {}], [None, {}], [None, {}]],
                         subplot_titles=[main_title, f'{metric} diff {diff}', 'ACF', 'PACF'])
 
-
-
-    ROYAL_BLUE = dict(color="#4169e1")
-
+    # The data is saved into the browser for faster processing
     if data:
         data_parsed = pd.read_json(data, orient='split')
         data_parsed.date = pd.to_datetime(data_parsed.date)
         ts = pd.Series(data_parsed.target.values, index=pd.to_datetime(data_parsed.date))
         ts.index = pd.PeriodIndex(ts.index, freq=dategran)
 
-        # Apply diff:
+        # Differentiate
         while diff > 0:
             diff -= 1
             ts = ts.diff().dropna()
@@ -203,55 +218,73 @@ def plot_ts(data, diff, dategran, metric_lab, shop_lab, cat_lab, horizon, predic
         acf_val = acf(ts)
         pacf_val = pacf(ts)
 
-
-        # Build trace
+        # Build the plot elements
         t1 = go.Scatter(x=data_parsed.date, y=data_parsed.target, name ="Main Timeseries", marker= ROYAL_BLUE)
-        t_diff = go.Scatter(x=ts.index.to_timestamp(), y=ts.values, name= f"DIFF {diff}", marker=ROYAL_BLUE, showlegend=False)
-        t_acf = go.Bar(x=list(range(0, len(acf_val))), y=acf_val, name='ACF', marker=ROYAL_BLUE, showlegend=False)
-        t_pacf = go.Bar(x=list(range(0, len(acf_val))), y=pacf_val, name='PACF',  marker=ROYAL_BLUE, showlegend=False)
-
-        fig.add_trace(t1, row=1, col=1)
-        fig.add_trace(t_diff, row=1, col=2)
-        fig.add_trace(t_acf, row=2, col=2)
-        fig.add_trace(t_pacf, row=3, col=2)
-
         ## Model
 
         if 'predict-but.n_clicks' in changed_id:
 
-            # Seasonality:
-            ses_setup = {'m': 12, 'seasonal': True} if dategran == 'M' else {'m': 1, 'seasonal': False}
-            print(ses_setup)
+            fig = make_subplots(rows=3, cols=2, specs=[[{"rowspan": 3}, {}], [None, {}], [None, {}]],
+                                subplot_titles=[main_title, f'Errors Distribution', 'ACF Residuals', 'PACF Residuals'])
 
-            val_size = int(len(ts) * 0.1)
-            oos_size= 0 if len(ts)< 25 else val_size
+            # Calculate the validation size
+            # For time series with very few observations omit the validation
+            val_size = int(len(ts) * 0.05)
+            oos_size = 0 if len(ts)<  25 else val_size
 
             # Perform the prediction
             model = auto_arima(ts, start_p=0, start_q=0, test='adf',
                               max_p=10, max_q=10, d=None, start_P=0,
                               D=0, error_action='ignore', stepwise=True,
                               out_of_sample_size=oos_size, trace=True,
-                              **ses_setup)
+                              **SES_SETUP)
 
+            # CALCULATE THE MODEL
             model_name = f"ARIMA: {model.get_params()['order']} | {model.get_params()['seasonal_order']}"
             fc, intrvl = model.predict(horizon, return_conf_int=True)
             fc_tstamp = pd.date_range(ts.index.max().to_timestamp(), periods=horizon+1, freq=dategran).to_pydatetime()
+            e = model.resid()
+            acf_val = acf(e)
+            pacf_val = pacf(e)
 
 
+            
             # Create the traces
             # They varry a bit thats why we don't put them in loop
             trace_fc = go.Scatter(x=fc_tstamp[1:], y=np.where(fc<0, 0, fc),
-                                  name=model_name, mode='lines+markers', marker=dict(color="#FF2400"))
+                                  name=model_name, mode='lines+markers', marker=SCARLET_RED)
 
             trace_lo = go.Scatter(x=fc_tstamp[1:], y=np.where(intrvl[:, 0] < 0, 0, intrvl[:, 0]),
-                                  showlegend=False, mode='lines+markers', marker=dict(color="#FFA500"))
+                                  showlegend=False, mode='lines+markers', marker=ORANGE)
 
             trace_up = go.Scatter(x=fc_tstamp[1:], y=np.where(intrvl[:, 1] < 0, 0, intrvl[:, 1]),
-                                  showlegend=False, mode='lines+markers', marker=dict(color="#FFA500"))
+                                  showlegend=False, mode='lines+markers', marker=ORANGE)
 
-            fig.add_trace(trace_fc)
-            fig.add_trace(trace_lo)
-            fig.add_trace(trace_up)
+            t_diff = go.Histogram(x=e, marker=ROYAL_BLUE, name="Error Distribution:")
+            t_acf = go.Bar(x=list(range(0, len(acf_val))), y=acf_val, name='ACF Residuals', marker=ROYAL_BLUE, showlegend=False)
+            t_pacf = go.Bar(x=list(range(0, len(acf_val))), y=pacf_val, name='PACF Residuals', marker=ROYAL_BLUE,
+                            showlegend=False)
+
+            fig.add_trace(trace_fc, row=1, col=1)
+            fig.add_trace(trace_lo, row=1, col=1)
+            fig.add_trace(trace_up, row=1, col=1)
+
+        else:
+            
+            # If we are not making a prediction then we plot 
+            # the differentiated time series + the ACF and PACF
+            t_diff = go.Scatter(x=ts.index.to_timestamp(), y=ts.values, name=f"DIFF {diff}", marker=ROYAL_BLUE,
+                                showlegend=False)
+            t_acf = go.Bar(x=list(range(0, len(acf_val))), y=acf_val, name='ACF', marker=ROYAL_BLUE, showlegend=False)
+            t_pacf = go.Bar(x=list(range(0, len(acf_val))), y=pacf_val, name='PACF', marker=ROYAL_BLUE,
+                            showlegend=False)
+
+        fig.add_trace(t1, row=1, col=1)
+        fig.add_trace(t_diff, row=1, col=2)
+        fig.add_trace(t_acf, row=2, col=2)
+        fig.add_trace(t_pacf, row=3, col=2)
+
+
 
         fig.update_layout(autosize=False,
                           template='simple_white',
