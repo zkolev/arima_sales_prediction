@@ -1,1 +1,1 @@
-web: gunicorn main:serverg9i
+web: gunicorn main:server 
